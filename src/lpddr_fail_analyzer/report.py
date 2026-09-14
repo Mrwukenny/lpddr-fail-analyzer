@@ -11,9 +11,20 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 
+from lpddr_fail_analyzer.audit import AddrAudit
 from lpddr_fail_analyzer.classify import LABEL_ZH, DieAnalysis
 from lpddr_fail_analyzer.hexutil import fmt_hex
-from lpddr_fail_analyzer.ingest import BatchMeta, CANONICAL_COLUMNS
+from lpddr_fail_analyzer.ingest import BatchMeta, CANONICAL_COLUMNS, IngestStats
+
+# P1 wording (must appear in report.md).
+CHANNEL_RANK_DISCLAIMER = (
+    "输入中无 Channel/Rank：按 **single-channel view**（单通道视角）处理；"
+    "若双通道被合并进同一份 fail_msg，存在 dual-channel mixing risk（通道混叠风险）。"
+)
+COL_GRANULARITY_DISCLAIMER = (
+    "**COL is tester decode granularity, NOT JEDEC bare physical column**"
+    "（COL 是测试机解码粒度，不是 JEDEC 裸物理列）。"
+)
 
 ARRAY_LIKE = {"bad_column", "bad_row", "spatial_2d_cluster", "bank_local_cluster"}
 IFACE_LIKE = {"scatter", "single_bit_stuck", "coupling_suspect"}
@@ -43,7 +54,15 @@ def _top_hex(pairs: list[tuple[int, int]]) -> str:
     return ", ".join(parts)
 
 
-def write_summary_csv(dies: list[DieAnalysis], path: Path) -> None:
+def write_summary_csv(
+    dies: list[DieAnalysis],
+    path: Path,
+    stats: IngestStats | None = None,
+    run_status: str = "ok",
+    addr_mismatch: int = 0,
+) -> None:
+    dropped = stats.dropped_rows if stats is not None else 0
+    dropped_bad = stats.dropped_bad_address if stats is not None else 0
     rows = []
     for d in dies:
         rows.append(
@@ -62,6 +81,10 @@ def write_summary_csv(dies: list[DieAnalysis], path: Path) -> None:
                 "top_col": fmt_hex(d.top_cols[0][0]) if d.top_cols else "",
                 "top_bank": d.top_banks[0][0] if d.top_banks else "",
                 "xor_hint0": d.xor_hints[0] if d.xor_hints else "",
+                "run_status": run_status,
+                "dropped_rows": dropped,
+                "dropped_bad_address": dropped_bad,
+                "addr_mismatch": addr_mismatch,
             }
         )
     pd.DataFrame(rows).to_csv(path, index=False, encoding="utf-8-sig")
@@ -261,12 +284,22 @@ def auto_conclusion(meta: BatchMeta, dies: list[DieAnalysis]) -> list[str]:
     return [sentence1, sentence2, next_cut]
 
 
+def run_status_label(stats: IngestStats | None, audit: AddrAudit | None) -> str:
+    if stats is not None and stats.incomplete:
+        return "incomplete"
+    if audit is not None and audit.has_warnings:
+        return "warnings"
+    return "ok"
+
+
 def write_report_md(
     meta: BatchMeta,
     fails: pd.DataFrame,
     dies: list[DieAnalysis],
     heatmap_paths: list[Path],
     out_path: Path,
+    stats: IngestStats | None = None,
+    audit: AddrAudit | None = None,
 ) -> None:
     n_dies = len(dies)
     n_rows = len(fails)
@@ -275,6 +308,7 @@ def write_report_md(
     for d in dies:
         pattern_total.update(d.pattern_counts)
     conclusions = auto_conclusion(meta, dies)
+    status = run_status_label(stats, audit)
 
     header_rows = [
         ("输入文件", str(meta.source_path)),
@@ -287,6 +321,7 @@ def write_report_md(
         ("测试颗粒总数量", meta.total_dies or "—"),
         ("良品总数", meta.good_dies or "—"),
         ("良率", meta.yield_rate or "—"),
+        ("run_status", status),
     ]
 
     lines: list[str] = []
@@ -297,6 +332,22 @@ def write_report_md(
         "**不断言** SI、ECC、row-hammer 或其他根因。"
     )
     lines.append("")
+    if status == "incomplete":
+        dropped = stats.dropped_rows if stats is not None else 0
+        bad = stats.dropped_bad_address if stats is not None else 0
+        lines.append(
+            f"> ⚠️ **INCOMPLETE / WARNINGS** — 本报告不是一次完全干净的成功运行。"
+            f" dropped_rows={dropped}（unparseable ROW/BANK/COL={bad}）。"
+            " 分类仅基于 kept 行。"
+        )
+        lines.append("")
+    elif status == "warnings":
+        n_mis = audit.n_mismatch if audit is not None else 0
+        lines.append(
+            f"> ⚠️ **WARNINGS** — Linear ADDR 与 ROW/BANK/COL 存在一致性不匹配"
+            f"（n_mismatch={n_mis}）。本报告带警告，不是完全干净的成功运行。"
+        )
+        lines.append("")
     lines.append("## 批次信息")
     lines.append("")
     lines.append("| 字段 | 值 |")
@@ -306,10 +357,35 @@ def write_report_md(
     lines.append("")
     lines.append("## 总览")
     lines.append("")
-    lines.append(f"- fail 地址行： **{n_rows}**")
+    lines.append(f"- fail 地址行（kept）： **{n_rows}**")
+    if stats is not None:
+        lines.append(f"- candidate 地址行： **{stats.candidate_rows}**")
+        lines.append(
+            f"- dropped_rows： **{stats.dropped_rows}** "
+            f"（unparseable ROW/BANK/COL={stats.dropped_bad_address}, "
+            f"missing Site/Slot={stats.dropped_no_identity}）"
+        )
     lines.append(f"- 颗粒数（Site+Slot fill-forward 后）： **{n_dies}**")
     lines.append(f"- 唯一 (ROW,BANK,COL) 格点： **{n_cells}**")
     lines.append(f"- Pattern 种类： **{fails['pattern_name'].nunique(dropna=True)}**")
+    if audit is not None:
+        lines.append(
+            f"- Linear ADDR 审计 n_mismatch： **{audit.n_mismatch}** "
+            f"（有 Linear ADDR 的 kept 行 {audit.n_with_linear}/{audit.n_rows}）"
+        )
+    lines.append("")
+    lines.append("## 警告")
+    lines.append("")
+    warn_bits: list[str] = []
+    if stats is not None:
+        warn_bits.extend(stats.warning_lines())
+    if audit is not None:
+        warn_bits.extend(audit.warning_lines())
+    if not warn_bits:
+        lines.append("无。dropped_rows=0，Linear ADDR 审计无 mismatch。")
+    else:
+        for w in warn_bits:
+            lines.append(f"- {w}")
     lines.append("")
     lines.append("## 颗粒主标签")
     lines.append("")
@@ -382,6 +458,8 @@ def write_report_md(
     lines.append("## 提示")
     lines.append("")
     lines.append(f"- {lpddr_type_tip(meta.pn)}")
+    lines.append(f"- {CHANNEL_RANK_DISCLAIMER}")
+    lines.append(f"- {COL_GRANULARITY_DISCLAIMER}")
     lines.append(
         "- Site/Slot/Loop/Pattern Name 在 Excel 中常只写在该颗/该段首行，解析时已按列 fill-forward。"
     )

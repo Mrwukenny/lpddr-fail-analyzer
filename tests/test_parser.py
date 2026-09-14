@@ -113,7 +113,9 @@ def test_csv_fill_forward(tmp_path: Path):
         ",,, ,0x2,0x11,0,0x0,0,1,1,1,1,1\n",
         encoding="utf-8",
     )
-    df, meta = load_fails(csv_path)
+    df, meta, stats = load_fails(csv_path)
+    assert stats.dropped_rows == 0
+    assert stats.kept_rows == 2
     assert list(df["site"].unique()) == ["9"]
     assert list(df["slot"].unique()) == ["8"]
     assert list(df["pattern_name"].unique()) == ["foo"]
@@ -123,7 +125,8 @@ def test_csv_fill_forward(tmp_path: Path):
 
 def test_xlsx_fill_forward_and_summary(tmp_path: Path):
     xlsx = _tiny_xlsx(tmp_path / "tiny.xlsx")
-    df, meta = load_fails(xlsx)
+    df, meta, stats = load_fails(xlsx)
+    assert stats.dropped_rows == 0
     assert meta.pn == "DEMO-LPDDR4X-PN"
     assert meta.lot_id == "LOT.FFWD"
     assert meta.temperature == "85"
@@ -158,7 +161,8 @@ def test_normalize_accepts_already_headed_frame():
             [5, 6, 1, "p", "0xAA", "0x1", 7, "0x2"],
         ]
     )
-    out = normalize_fail_frame(raw)
+    out, stats = normalize_fail_frame(raw)
+    assert stats.dropped_rows == 0
     assert out.iloc[0]["site"] == "5"
     assert out.iloc[0]["row_i"] == 0x1
     assert out.iloc[0]["col_i"] == 0x2

@@ -67,6 +67,13 @@ CSV 样本 `samples/sample_fail_msg.csv` 已是填好的版本，工具仍会做
 
 Summary 表若存在，会抽取 `PN`、`LOT ID`、`测试温度`、`VDD1/VDD2/VDDQ`、产量统计写入报告页眉。
 
+## 数据质量（避免假绿）
+
+- 无法解析的 ROW/BANK/COL **不会被静默丢掉**：计入 `dropped_rows`，写入日志、`report.md` 警告区与 `summary.csv`。半坏文件会标成 **INCOMPLETE / WARNINGS**，CLI 退出码非 0（仍会写出报告）。若全部地址行都坏，则硬失败、不写看起来成功的报告。
+- 输入无 Channel/Rank：按 **single-channel view** 处理；同一份 fail_msg 若混了双通道，存在 dual-channel mixing risk。
+- **COL is tester decode granularity, NOT JEDEC bare physical column。**
+- 若存在 Linear ADDR，会对其与 ROW/BANK/COL 做一致性审计（同一 Linear ADDR 不得对应多个格点；同一格点的 Linear ADDR 不得在突发窗口之外发散）。
+
 ## 样本示例
 
 仓库内 `samples/sample_batch.xlsx` 含 `Summary`、`board_msg`、`fail_msg` 三张表。在仓库根目录执行：
