@@ -360,6 +360,218 @@ def _pick_summary_sheet(names: list[str]) -> str | None:
     return None
 
 
+def _pick_board_sheet(names: list[str]) -> str | None:
+    lowered = {n.lower().strip(): n for n in names}
+    for key in ("board_msg", "board msg", "boardmsg"):
+        if key in lowered:
+            return lowered[key]
+    for n in names:
+        if "board" in n.lower() and "fail" not in n.lower():
+            return n
+    return None
+
+
+BOARD_HEADER_TOKEN_GROUPS: dict[str, tuple[str, ...]] = {
+    "site": ("site",),
+    "slot": ("slot",),
+    "result": ("result",),
+    "bin": ("bin code", "bincode", "bin"),
+    "fail_loop": ("fail loop", "failloop"),
+    "elapsed": ("elapsed time", "elapsed"),
+    "lot_id": ("lot id", "lot"),
+    "pn": ("pn",),
+}
+
+BOARD_REQUIRED_HEADER_KEYS = ("site", "slot", "result")
+
+_FAIL_RESULT_TOKENS = frozenset({"fail", "failed", "ng", "不良", "失败"})
+
+
+def _match_board_canonical(token: str) -> str | None:
+    if not token:
+        return None
+    cleaned = " ".join(token.replace("*", " ").split())
+    for canon, aliases in BOARD_HEADER_TOKEN_GROUPS.items():
+        if cleaned in aliases:
+            return canon
+    return None
+
+
+def is_fail_result(value: Any) -> bool:
+    text = cell_to_str(value)
+    if text is None:
+        return False
+    stripped = text.strip()
+    if stripped in {"不良", "失败"}:
+        return True
+    return stripped.casefold() in {t.casefold() for t in _FAIL_RESULT_TOKENS}
+
+
+def find_board_header(rows: Iterable[Iterable[Any]], max_scan: int = 20) -> tuple[int, dict[int, str]]:
+    """Return (body_start_row, {col_index: canonical_name}) for board_msg.
+
+    Real SLT files use a two-row header: Result/Bin on the first row, Site/Slot on the second
+    (under a merged Board ID label). Accumulates tokens across consecutive header rows.
+    """
+    prev_map: dict[int, str] = {}
+    for idx, row in enumerate(rows):
+        if idx >= max_scan:
+            break
+        this_map: dict[int, str] = {}
+        for col_i, cell in enumerate(row):
+            token = _norm_header_token(cell)
+            canon = _match_board_canonical(token)
+            if canon and canon not in this_map.values():
+                this_map[col_i] = canon
+        merged = dict(prev_map)
+        merged.update(this_map)
+        if all(key in merged.values() for key in BOARD_REQUIRED_HEADER_KEYS):
+            return idx + 1, merged
+        prev_map = merged
+    raise ValueError(
+        "Could not find board_msg header row(s) containing Site, Slot, Result"
+    )
+
+
+def _site_slot_sort_key(site: str, slot: str) -> tuple:
+    def part(value: str) -> tuple[int, int | str]:
+        try:
+            return (0, int(value))
+        except ValueError:
+            return (1, value)
+
+    return (part(site), part(slot))
+
+
+@dataclass
+class BoardDie:
+    """One unique Site+Slot seen as fail on board_msg (multi-round rows collapsed)."""
+
+    site: str
+    slot: str
+    n_board_rows: int
+    n_fail_rows: int
+    bins: list[str] = field(default_factory=list)
+
+    @property
+    def die_id(self) -> str:
+        return f"S{self.site}_Q{self.slot}"
+
+
+@dataclass
+class BoardCensus:
+    """Unique Site+Slot census from board_msg — never treat row/bin counts as 颗数."""
+
+    present: bool
+    sheet_name: str | None = None
+    missing_reason: str | None = None
+    header_error: str | None = None
+    n_board_rows: int = 0
+    n_unique_site_slot: int = 0
+    n_fail_rows: int = 0
+    fail_dies: list[BoardDie] = field(default_factory=list)
+
+    @property
+    def n_unique_fail_dies(self) -> int:
+        return len(self.fail_dies)
+
+
+def normalize_board_frame(raw: pd.DataFrame) -> BoardCensus:
+    """Parse a board_msg table into unique Site+Slot fail dies (not row counts)."""
+    if raw.empty:
+        return BoardCensus(present=True, missing_reason="empty")
+
+    body_idx, col_map = find_board_header(raw.itertuples(index=False, name=None))
+    body = raw.iloc[body_idx:].copy()
+    body.columns = range(body.shape[1])
+
+    out = pd.DataFrame()
+    for col_i, canon in col_map.items():
+        if col_i < body.shape[1]:
+            out[canon] = body[col_i].values
+    for needed in ("site", "slot", "result"):
+        if needed not in out.columns:
+            out[needed] = pd.NA
+    if "bin" not in out.columns:
+        out["bin"] = pd.NA
+
+    for col in out.columns:
+        out[col] = _to_display(out[col])
+    out = _ffill_columns(out, ["site", "slot"])
+
+    has_any = _nonempty_mask(out["site"]) | _nonempty_mask(out["slot"]) | _nonempty_mask(out["result"])
+    out = out.loc[has_any].copy()
+
+    n_board_rows = int(len(out))
+    n_unique = int(out.dropna(subset=["site", "slot"]).drop_duplicates(["site", "slot"]).shape[0])
+    fail_mask = out["result"].map(is_fail_result)
+    n_fail_rows = int(fail_mask.sum())
+
+    fail_dies: list[BoardDie] = []
+    identified = out.dropna(subset=["site", "slot"])
+    for (site, slot), sub in identified.groupby(["site", "slot"], dropna=False, sort=False):
+        fail_sub = sub[sub["result"].map(is_fail_result)]
+        if fail_sub.empty:
+            continue
+        bins: list[str] = []
+        if "bin" in fail_sub.columns:
+            for raw_bin in fail_sub["bin"].tolist():
+                text = cell_to_str(raw_bin)
+                if text and text not in bins:
+                    bins.append(text)
+        fail_dies.append(
+            BoardDie(
+                site=str(site),
+                slot=str(slot),
+                n_board_rows=int(len(sub)),
+                n_fail_rows=int(len(fail_sub)),
+                bins=bins,
+            )
+        )
+    fail_dies.sort(key=lambda d: _site_slot_sort_key(d.site, d.slot))
+
+    return BoardCensus(
+        present=True,
+        n_board_rows=n_board_rows,
+        n_unique_site_slot=n_unique,
+        n_fail_rows=n_fail_rows,
+        fail_dies=fail_dies,
+    )
+
+
+def load_board_census(path: Path) -> BoardCensus:
+    """Load unique board-fail Site+Slot if a board_msg sheet exists."""
+    path = Path(path)
+    if path.suffix.lower() not in {".xlsx", ".xlsm", ".xls"}:
+        return BoardCensus(present=False, missing_reason="not_excel")
+    xl = pd.ExcelFile(path, engine="openpyxl")
+    sheet = _pick_board_sheet(xl.sheet_names)
+    if sheet is None:
+        return BoardCensus(present=False, missing_reason="no_sheet")
+    raw = pd.read_excel(xl, sheet_name=sheet, header=None, dtype=object)
+    try:
+        census = normalize_board_frame(raw)
+    except ValueError as exc:
+        log.warning("board_msg header not recognized: %s", exc)
+        return BoardCensus(
+            present=True,
+            sheet_name=sheet,
+            missing_reason="bad_header",
+            header_error=str(exc),
+        )
+    census.sheet_name = sheet
+    return census
+
+
+def board_fails_without_dump(
+    board: BoardCensus,
+    analyzable: Iterable[tuple[str, str]],
+) -> list[BoardDie]:
+    """board_msg fail Site+Slot that have no fail_msg address dump."""
+    have = {(str(site), str(slot)) for site, slot in analyzable}
+    return [d for d in board.fail_dies if (d.site, d.slot) not in have]
+
+
 def parse_summary_sheet(path: Path) -> BatchMeta:
     meta = BatchMeta(source_path=path)
     if path.suffix.lower() not in {".xlsx", ".xlsm", ".xls"}:

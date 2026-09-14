@@ -7,7 +7,7 @@ from pathlib import Path
 
 from lpddr_fail_analyzer.audit import AddrAudit, audit_linear_addr
 from lpddr_fail_analyzer.classify import analyze_all_dies
-from lpddr_fail_analyzer.ingest import IngestStats, load_fails
+from lpddr_fail_analyzer.ingest import BoardCensus, IngestStats, board_fails_without_dump, load_board_census, load_fails
 from lpddr_fail_analyzer.report import (
     run_status_label,
     write_heatmaps,
@@ -25,6 +25,9 @@ class AnalyzeResult:
     incomplete: bool
     warnings: list[str]
     run_status: str
+    n_analyzable_dies: int = 0
+    n_board_no_dump: int = 0
+    board: BoardCensus | None = None
 
     def __fspath__(self) -> str:
         return str(self.out_dir)
@@ -40,6 +43,7 @@ def run_analyze(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     fails, meta, stats = load_fails(input_path)
+    board = load_board_census(input_path)
     audit = audit_linear_addr(fails)
     dies = analyze_all_dies(fails)
     if not dies:
@@ -52,6 +56,7 @@ def run_analyze(
         stats=stats,
         run_status=status,
         addr_mismatch=audit.n_mismatch,
+        board=board,
     )
     heatmaps = write_heatmaps(dies, out_dir)
     if write_normalized:
@@ -64,8 +69,13 @@ def run_analyze(
         out_dir / "report.md",
         stats=stats,
         audit=audit,
+        board=board,
     )
     warnings = [*stats.warning_lines(), *audit.warning_lines()]
+    analyzable_keys = {(d.site, d.slot) for d in dies}
+    n_board_no_dump = 0
+    if board.present and board.missing_reason is None:
+        n_board_no_dump = len(board_fails_without_dump(board, analyzable_keys))
     return AnalyzeResult(
         out_dir=out_dir,
         stats=stats,
@@ -73,4 +83,7 @@ def run_analyze(
         incomplete=stats.incomplete,
         warnings=warnings,
         run_status=status,
+        n_analyzable_dies=len(dies),
+        n_board_no_dump=n_board_no_dump,
+        board=board,
     )

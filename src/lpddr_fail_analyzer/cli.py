@@ -44,6 +44,10 @@ def analyze_cmd(
     typer.echo(f"run_status={result.run_status}")
     typer.echo(f"dropped_rows={result.stats.dropped_rows} kept_rows={result.stats.kept_rows}")
     typer.echo(f"addr_mismatch={result.addr_audit.n_mismatch}")
+    typer.echo(
+        f"analyzable_dies={result.n_analyzable_dies} "
+        f"board_no_dump={result.n_board_no_dump}"
+    )
     typer.echo(f"wrote {result.out_dir / 'report.md'}")
     typer.echo(f"wrote {result.out_dir / 'summary.csv'}")
     if result.incomplete:
