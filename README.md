@@ -35,6 +35,8 @@ uv run python -m lpddr_fail_analyzer analyze samples\sample_fail_msg.csv --out o
    - 把 Excel/CSV **拖到 bat 上**；或
    - 直接运行，回车使用默认 `samples\sample_batch.xlsx`，也可粘贴路径。
 
+分析完成后请用**编辑器**打开 `out\report.md`（UTF-8）。cmd 窗口里中文仍可能乱码，报告文件本身是好的。bat 会先 `chcp 65001`；若 uv 提示 `Failed to hardlink files; falling back to full copy`，可忽略（bat 已设 `UV_LINK_MODE=copy`）。
+
 输出目录（`--out` 就是最终目录，例如 `out\demo`）包含：
 
 | 文件 | 内容 |
