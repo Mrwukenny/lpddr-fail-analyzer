@@ -1,0 +1,32 @@
+[project]
+name = "lpddr-fail-analyzer"
+version = "0.1.0"
+description = "Offline MVP CLI to classify LPDDR4/4X SLT fail_msg particle (die) structural suspects."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "matplotlib>=3.8",
+    "openpyxl>=3.1",
+    "pandas>=2.2",
+    "typer>=0.12",
+]
+
+[project.scripts]
+lpddr-fail-analyzer = "lpddr_fail_analyzer.cli:app"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["src"]
