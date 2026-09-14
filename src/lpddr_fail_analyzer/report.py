@@ -38,6 +38,8 @@ SECTION_BOARD_ONLY = "仅 board 不良、无 dump"
 NO_STRUCTURE_MARK = "本轮无法结构分类"
 MULTI_LOOP_DIE_TIP = "同颗多轮/多 loop 勿累加颗数"
 BIN_COUNT_TIP = "别拿分Bin数量直接当可分析颗数"
+BIN_NE_ANALYZABLE_TIP = "分Bin ≠ 可分析颗数"
+STATION_SWAP_VS_RETEST_TIP = "同工位无法分辨换料 vs 复测"
 BOARD_MISSING_NOTE = (
     "本批输入无 board_msg 表，无法列出仅 board 不良、无 dump 的颗粒。"
 )
@@ -286,7 +288,8 @@ def auto_conclusion(meta: BatchMeta, dies: list[DieAnalysis]) -> list[str]:
 
     sentence1 = (
         f"本批有地址明细、可分析颗粒 {n_dies} 颗"
-        f"（fail_msg 唯一 Site+Slot，同颗多轮/多 loop 不累加）、"
+        f"（fail_msg 唯一 Site+Slot，同颗多轮不累加；"
+        f"{STATION_SWAP_VS_RETEST_TIP}）、"
         f"{n_rows} 条失败地址行，"
         f"主模式是「{zh}」({top_lab}，{top_n}/{n_dies} 颗主标签)。"
     )
@@ -384,7 +387,8 @@ def _board_only_intro(board: BoardCensus, n_board_only: int) -> list[str]:
         "本节目列为 `board_msg` 中 Result=fail 的**唯一 Site+Slot**，"
         "且 `fail_msg` 没有 ROW/BANK/COL 地址 dump。"
         f"**{NO_STRUCTURE_MARK}**。"
-        " board 不良行数 / 分Bin 数量都不是可分析颗数。"
+        f" 去重键仅为 Site+Slot（Excel 无 UID）；**{STATION_SWAP_VS_RETEST_TIP}**。"
+        f"{BIN_NE_ANALYZABLE_TIP}。"
     )
     lines.append("")
     lines.append(
@@ -491,6 +495,7 @@ def write_report_md(
         )
     lines.append(
         f"- 可分析颗数（fail_msg 唯一 Site+Slot）： **{n_dies}**"
+        f"（去重键仅为 Site+Slot，Excel 无 UID；**{STATION_SWAP_VS_RETEST_TIP}**）"
     )
     if census.present and census.missing_reason is None:
         lines.append(
@@ -522,9 +527,11 @@ def write_report_md(
     lines.append(f"## {SECTION_ANALYZABLE}")
     lines.append("")
     lines.append(
-        "本节目列为 `fail_msg` 中带 ROW/BANK/COL 的**唯一 Site+Slot**。"
+        "本节目列为 `fail_msg` 中带 ROW/BANK/COL 的**唯一 Site+Slot**"
+        "（不去重 UID、不因地址长得不像而拆成两颗）。"
+        f"**{STATION_SWAP_VS_RETEST_TIP}**。"
         f"{MULTI_LOOP_DIE_TIP}；结构分类按唯一 (ROW,BANK,COL) 格点，多 loop 不放大坏行/坏列权重。"
-        f"{BIN_COUNT_TIP}。"
+        f"{BIN_COUNT_TIP}（{BIN_NE_ANALYZABLE_TIP}）。"
     )
     lines.append("")
     lines.append("### 颗粒主标签")
@@ -607,8 +614,9 @@ def write_report_md(
     lines.append("")
     lines.append("## 提示")
     lines.append("")
+    lines.append(f"- **{STATION_SWAP_VS_RETEST_TIP}**（去重键仅为 Site+Slot，Excel 无 UID，不拆成两颗）")
     lines.append(f"- **{MULTI_LOOP_DIE_TIP}**")
-    lines.append(f"- **{BIN_COUNT_TIP}**")
+    lines.append(f"- **{BIN_COUNT_TIP}**（{BIN_NE_ANALYZABLE_TIP}）")
     lines.append(f"- {lpddr_type_tip(meta.pn)}")
     lines.append(f"- {CHANNEL_RANK_DISCLAIMER}")
     lines.append(f"- {COL_GRANULARITY_DISCLAIMER}")

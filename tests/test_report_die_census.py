@@ -12,11 +12,13 @@ from lpddr_fail_analyzer.ingest import load_board_census, load_fails
 from lpddr_fail_analyzer.pipeline import run_analyze
 from lpddr_fail_analyzer.report import (
     BIN_COUNT_TIP,
+    BIN_NE_ANALYZABLE_TIP,
     BOARD_MISSING_NOTE,
     MULTI_LOOP_DIE_TIP,
     NO_STRUCTURE_MARK,
     SECTION_ANALYZABLE,
     SECTION_BOARD_ONLY,
+    STATION_SWAP_VS_RETEST_TIP,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,6 +47,16 @@ def _fail_body_rows(site: int, slot: int, loop: int, cells: list[tuple[int, int,
             f"{ident},0x{i:X},0x{row:X},{bank},0x{col:X},00,FF,FF,FF,FF,80\n"
         )
     return "".join(lines)
+
+
+def _assert_product_lock_wording(text: str) -> None:
+    assert f"## {SECTION_ANALYZABLE}" in text
+    assert f"## {SECTION_BOARD_ONLY}" in text
+    assert STATION_SWAP_VS_RETEST_TIP in text
+    assert MULTI_LOOP_DIE_TIP in text
+    assert BIN_COUNT_TIP in text
+    assert BIN_NE_ANALYZABLE_TIP in text
+    assert "同颗多轮勿累加" in text
 
 
 def test_multi_loop_same_site_slot_counts_as_one_analyzable_die(tmp_path: Path):
@@ -77,10 +89,7 @@ def test_multi_loop_same_site_slot_counts_as_one_analyzable_die(tmp_path: Path):
     assert result.n_analyzable_dies == 1
     text = (out / "report.md").read_text(encoding="utf-8")
     assert f"- 可分析颗数（fail_msg 唯一 Site+Slot）： **1**" in text
-    assert f"## {SECTION_ANALYZABLE}" in text
-    assert f"## {SECTION_BOARD_ONLY}" in text
-    assert MULTI_LOOP_DIE_TIP in text
-    assert BIN_COUNT_TIP in text
+    _assert_product_lock_wording(text)
     assert BOARD_MISSING_NOTE in text
     summary = pd.read_csv(out / "summary.csv")
     analyzable = summary[summary["section"] == SECTION_ANALYZABLE]
@@ -103,6 +112,48 @@ def test_two_site_slots_are_two_dies_even_with_loops(tmp_path: Path):
     assert by_key[("15", "7")].n_loops == 2
     assert by_key[("1", "1")].n_loops == 1
     assert all(d.n_unique_cells == 8 for d in dies)
+
+
+def test_same_station_disjoint_loops_not_split_into_two_dies(tmp_path: Path):
+    """No UID in Excel: two unlike address sets on the same Site+Slot stay one die."""
+    col_cells = _col_line_cells(8)
+    row_cells = [(0x200, 1, 0x30 + c) for c in range(8)]
+    body = _fail_body_rows(15, 7, 1, col_cells) + _fail_body_rows(15, 7, 2, row_cells)
+    csv_path = _write_csv(tmp_path / "maybe_swap.csv", body)
+    df, _, _ = load_fails(csv_path)
+    dies = analyze_all_dies(df)
+    assert len(dies) == 1
+    die = dies[0]
+    assert (die.site, die.slot) == ("15", "7")
+    assert die.n_loops == 2
+    assert die.n_unique_cells == 16
+    text = (run_analyze(csv_path, tmp_path / "maybe-swap-out").out_dir / "report.md").read_text(
+        encoding="utf-8"
+    )
+    _assert_product_lock_wording(text)
+    assert f"- 可分析颗数（fail_msg 唯一 Site+Slot）： **1**" in text
+
+
+def test_extra_uid_column_does_not_split_site_slot(tmp_path: Path):
+    """A stray UID column must not become a second identity key."""
+    csv_path = tmp_path / "with_uid.csv"
+    csv_path.write_text(
+        "Site,Slot,UID,Loop,Pattern Name,Linear ADDR,ROW,BANK,COL,"
+        "EXP Value,RD Value,Re-read value1,Re-read value2,Re-read value3,XOR Val1\n"
+        "15,7,DIE-A,1,pA,0x1,0x100,0,0x10,00,FF,FF,FF,FF,80\n"
+        "15,7,DIE-B,2,pA,0x2,0x101,0,0x10,00,FF,FF,FF,FF,80\n"
+        "15,7,DIE-C,3,pA,0x3,0x102,0,0x10,00,FF,FF,FF,FF,80\n",
+        encoding="utf-8",
+    )
+    df, _, _ = load_fails(csv_path)
+    assert "uid" not in [c.lower() for c in df.columns]
+    dies = analyze_all_dies(df)
+    assert len(dies) == 1
+    assert dies[0].n_loops == 3
+    result = run_analyze(csv_path, tmp_path / "uid-out")
+    assert result.n_analyzable_dies == 1
+    text = (result.out_dir / "report.md").read_text(encoding="utf-8")
+    _assert_product_lock_wording(text)
 
 
 def _xlsx_board_and_fail(path: Path) -> Path:
@@ -193,10 +244,7 @@ def test_board_no_dump_section_from_xlsx(tmp_path: Path):
     assert result.n_analyzable_dies == 1
     assert result.n_board_no_dump == 1
     text = (result.out_dir / "report.md").read_text(encoding="utf-8")
-    assert f"## {SECTION_ANALYZABLE}" in text
-    assert f"## {SECTION_BOARD_ONLY}" in text
-    assert MULTI_LOOP_DIE_TIP in text
-    assert BIN_COUNT_TIP in text
+    _assert_product_lock_wording(text)
     assert NO_STRUCTURE_MARK in text
     assert f"- 可分析颗数（fail_msg 唯一 Site+Slot）： **1**" in text
     assert "- 仅 board 不良、无 dump： **1**" in text
@@ -261,10 +309,7 @@ def test_sample_batch_splits_analyzable_and_board_only(tmp_path: Path):
     assert result.n_analyzable_dies == 1
     assert result.n_board_no_dump == 19
     text = (result.out_dir / "report.md").read_text(encoding="utf-8")
-    assert f"## {SECTION_ANALYZABLE}" in text
-    assert f"## {SECTION_BOARD_ONLY}" in text
-    assert MULTI_LOOP_DIE_TIP in text
-    assert BIN_COUNT_TIP in text
+    _assert_product_lock_wording(text)
     assert NO_STRUCTURE_MARK in text
     assert f"- 可分析颗数（fail_msg 唯一 Site+Slot）： **1**" in text
     assert "- 仅 board 不良、无 dump： **19**" in text

@@ -63,13 +63,13 @@ uv run pytest
 - **真正表头** 是含有这些列名的那一行：`Site, Slot, Loop, Pattern Name, Linear ADDR, ROW, BANK, COL, EXP Value, RD Value, Re-read value1, Re-read value2, Re-read value3, XOR Val1`
 - 解析器会在前几十行里 **按列名搜索表头**，不写死行号
 - 同一颗的后续失败地址行里，Site / Slot / Loop / Pattern Name **经常是空的**，必须从上一行非空值 **向下填充（fill-forward）**
-- 多颗 = fill-forward 之后的多个 **唯一 Site+Slot**（同颗多轮 / 多 Loop **不计多次**）
+- 多颗 = fill-forward 之后的多个 **唯一 Site+Slot**（同颗多轮 / 多 Loop **不计多次**）。Excel **无 UID**，**同工位无法分辨换料 vs 复测**，因此不去重拆成两颗。
 
 CSV 样本 `samples/sample_fail_msg.csv` 已是填好的版本，工具仍会做一次 fill-forward，空单元格也能补上。
 
 Summary 表若存在，会抽取 `PN`、`LOT ID`、`测试温度`、`VDD1/VDD2/VDDQ`、产量统计写入报告页眉。
 
-若存在 `board_msg`，会单独列出 **仅 board 不良、无 dump** 的 Site+Slot（本轮无法结构分类）。**可分析颗数**只来自 `fail_msg` 里带 ROW/BANK/COL 的唯一 Site+Slot，不要把分Bin 数量或 board 不良行数当成可分析颗数。
+若存在 `board_msg`，会单独列出 **仅 board 不良、无 dump** 的 Site+Slot（本轮无法结构分类）。**可分析颗数**只来自 `fail_msg` 里带 ROW/BANK/COL 的唯一 Site+Slot（分Bin ≠ 可分析颗数）。同一 Site+Slot 即使多轮地址完全不像，仍计 1 颗。
 
 ## 数据质量（避免假绿）
 

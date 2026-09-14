@@ -350,9 +350,15 @@ def analyze_die(site: str, slot: str, df: pd.DataFrame) -> DieAnalysis:
     )
 
 
+# Product lock: SLT Excel has no die UID. Never split one Site+Slot into two dies
+# (cannot tell a station swap from a retest).
+DIE_DEDUP_KEYS = ("site", "slot")
+
+
 def analyze_all_dies(fails: pd.DataFrame) -> list[DieAnalysis]:
+    """One analyzable die per unique Site+Slot — not per loop, UID, or bin row."""
     results: list[DieAnalysis] = []
-    grouped = fails.groupby(["site", "slot"], dropna=False, sort=True)
+    grouped = fails.groupby(list(DIE_DEDUP_KEYS), dropna=False, sort=True)
     for (site, slot), sub in grouped:
         results.append(analyze_die(str(site), str(slot), sub))
     return results
