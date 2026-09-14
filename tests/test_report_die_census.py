@@ -39,12 +39,19 @@ def _col_line_cells(n: int = 8) -> list[tuple[int, int, int]]:
     return [(0x100 + r, 0, 0x10) for r in range(n)]
 
 
-def _fail_body_rows(site: int, slot: int, loop: int, cells: list[tuple[int, int, int]]) -> str:
+def _fail_body_rows(
+    site: int,
+    slot: int,
+    loop: int,
+    cells: list[tuple[int, int, int]],
+    linear_base: int = 0,
+) -> str:
     lines = []
     for i, (row, bank, col) in enumerate(cells):
         ident = f"{site},{slot},{loop},pA" if i == 0 else ",,,"
+        lin = linear_base + i
         lines.append(
-            f"{ident},0x{i:X},0x{row:X},{bank},0x{col:X},00,FF,FF,FF,FF,80\n"
+            f"{ident},0x{lin:X},0x{row:X},{bank},0x{col:X},00,FF,FF,FF,FF,80\n"
         )
     return "".join(lines)
 
@@ -118,7 +125,8 @@ def test_same_station_disjoint_loops_not_split_into_two_dies(tmp_path: Path):
     """No UID in Excel: two unlike address sets on the same Site+Slot stay one die."""
     col_cells = _col_line_cells(8)
     row_cells = [(0x200, 1, 0x30 + c) for c in range(8)]
-    body = _fail_body_rows(15, 7, 1, col_cells) + _fail_body_rows(15, 7, 2, row_cells)
+    body = _fail_body_rows(15, 7, 1, col_cells, linear_base=0x1000)
+    body += _fail_body_rows(15, 7, 2, row_cells, linear_base=0x2000)
     csv_path = _write_csv(tmp_path / "maybe_swap.csv", body)
     df, _, _ = load_fails(csv_path)
     dies = analyze_all_dies(df)

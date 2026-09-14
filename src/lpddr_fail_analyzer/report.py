@@ -530,7 +530,7 @@ def write_report_md(
         "本节目列为 `fail_msg` 中带 ROW/BANK/COL 的**唯一 Site+Slot**"
         "（不去重 UID、不因地址长得不像而拆成两颗）。"
         f"**{STATION_SWAP_VS_RETEST_TIP}**。"
-        f"{MULTI_LOOP_DIE_TIP}；结构分类按唯一 (ROW,BANK,COL) 格点，多 loop 不放大坏行/坏列权重。"
+        f"同颗多轮勿累加；{MULTI_LOOP_DIE_TIP}；结构分类按唯一 (ROW,BANK,COL) 格点，多 loop 不放大坏行/坏列权重。"
         f"{BIN_COUNT_TIP}（{BIN_NE_ANALYZABLE_TIP}）。"
     )
     lines.append("")
@@ -615,7 +615,7 @@ def write_report_md(
     lines.append("## 提示")
     lines.append("")
     lines.append(f"- **{STATION_SWAP_VS_RETEST_TIP}**（去重键仅为 Site+Slot，Excel 无 UID，不拆成两颗）")
-    lines.append(f"- **{MULTI_LOOP_DIE_TIP}**")
+    lines.append(f"- **同颗多轮勿累加**（{MULTI_LOOP_DIE_TIP}）")
     lines.append(f"- **{BIN_COUNT_TIP}**（{BIN_NE_ANALYZABLE_TIP}）")
     lines.append(f"- {lpddr_type_tip(meta.pn)}")
     lines.append(f"- {CHANNEL_RANK_DISCLAIMER}")
