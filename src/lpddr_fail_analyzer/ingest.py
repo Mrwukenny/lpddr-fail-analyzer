@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -9,6 +10,8 @@ from typing import Any, Iterable
 import pandas as pd
 
 from lpddr_fail_analyzer.hexutil import cell_to_str, is_empty, parse_int_field
+
+log = logging.getLogger(__name__)
 
 CANONICAL_COLUMNS = [
     "site",
@@ -48,6 +51,79 @@ HEADER_TOKEN_GROUPS: dict[str, tuple[str, ...]] = {
 }
 
 REQUIRED_HEADER_KEYS = ("site", "slot", "row", "bank", "col")
+
+# Fields that mark a body row as a real fail-address candidate (not Excel padding).
+# Site/Slot/Loop/Pattern are fill-forwarded, so they must not be used here.
+ADDRESS_HINT_COLUMNS = (
+    "row",
+    "bank",
+    "col",
+    "linear_addr",
+    "exp_value",
+    "rd_value",
+    "xor_val1",
+    "reread1",
+    "reread2",
+    "reread3",
+)
+
+MAX_DROP_EXAMPLES = 8
+
+
+@dataclass
+class DropExample:
+    reason: str
+    site: str | None = None
+    slot: str | None = None
+    row: str | None = None
+    bank: str | None = None
+    col: str | None = None
+    linear_addr: str | None = None
+
+    def as_text(self) -> str:
+        parts = [self.reason]
+        for label, val in (
+            ("Site", self.site),
+            ("Slot", self.slot),
+            ("ROW", self.row),
+            ("BANK", self.bank),
+            ("COL", self.col),
+            ("Linear ADDR", self.linear_addr),
+        ):
+            if val is not None:
+                parts.append(f"{label}={val}")
+        return "; ".join(parts)
+
+
+@dataclass
+class IngestStats:
+    """How many candidate fail rows were kept vs explicitly dropped (never silent)."""
+
+    candidate_rows: int = 0
+    kept_rows: int = 0
+    dropped_rows: int = 0
+    dropped_bad_address: int = 0
+    dropped_no_identity: int = 0
+    skipped_padding_rows: int = 0
+    examples: list[DropExample] = field(default_factory=list)
+
+    @property
+    def incomplete(self) -> bool:
+        return self.dropped_rows > 0
+
+    def warning_lines(self) -> list[str]:
+        if self.dropped_rows <= 0:
+            return []
+        lines = [
+            f"dropped_rows={self.dropped_rows} "
+            f"(unparseable ROW/BANK/COL={self.dropped_bad_address}, "
+            f"missing Site/Slot after fill-forward={self.dropped_no_identity}); "
+            f"kept_rows={self.kept_rows} / candidate_rows={self.candidate_rows}. "
+            "Classification used kept rows only — this is not a fully clean run."
+        ]
+        for ex in self.examples:
+            lines.append(f"  drop example: {ex.as_text()}")
+        return lines
 
 SUMMARY_KEYS = (
     "PN",
@@ -141,8 +217,37 @@ def _to_display(series: pd.Series) -> pd.Series:
     return series.map(cell_to_str)
 
 
-def normalize_fail_frame(raw: pd.DataFrame) -> pd.DataFrame:
-    """Map a table (with or without a title block) onto canonical fail_msg columns."""
+def _nonempty_mask(series: pd.Series) -> pd.Series:
+    return series.map(lambda v: not is_empty(v))
+
+
+def _drop_example(reason: str, rec: pd.Series) -> DropExample:
+    def _s(key: str) -> str | None:
+        return cell_to_str(rec[key]) if key in rec.index else None
+
+    return DropExample(
+        reason=reason,
+        site=_s("site"),
+        slot=_s("slot"),
+        row=_s("row"),
+        bank=_s("bank"),
+        col=_s("col"),
+        linear_addr=_s("linear_addr"),
+    )
+
+
+class NoValidAddressRowsError(ValueError):
+    """Every candidate address row was unparseable or lacked Site/Slot — fail hard."""
+
+
+def normalize_fail_frame(raw: pd.DataFrame) -> tuple[pd.DataFrame, IngestStats]:
+    """Map a table (with or without a title block) onto canonical fail_msg columns.
+
+    Rows with unparseable ROW/BANK/COL are **not** silently dropped: they are counted
+    in ``IngestStats.dropped_rows``. Padding / fully empty body rows are skipped and
+    do not count as dropped. If every candidate row is bad, raises
+    ``NoValidAddressRowsError``.
+    """
     if raw.empty:
         raise ValueError("fail_msg table is empty")
 
@@ -170,16 +275,59 @@ def normalize_fail_frame(raw: pd.DataFrame) -> pd.DataFrame:
     out["linear_i"] = out["linear_addr"].map(parse_int_field)
     out["loop_i"] = out["loop"].map(parse_int_field)
 
-    # Keep rows that look like fail addresses.
-    mask = out["row_i"].notna() & out["bank_i"].notna() & out["col_i"].notna()
-    out = out.loc[mask].copy()
-    if out.empty:
-        raise ValueError("No fail address rows after header detection / fill-forward")
+    hint = pd.Series(False, index=out.index)
+    for col in ADDRESS_HINT_COLUMNS:
+        if col in out.columns:
+            hint = hint | _nonempty_mask(out[col])
 
-    # Drop leftover title rows accidentally captured (no site/slot after ffill).
-    out = out[out["site"].notna() & out["slot"].notna()].copy()
+    parseable = out["row_i"].notna() & out["bank_i"].notna() & out["col_i"].notna()
+    has_id = out["site"].notna() & out["slot"].notna()
+    candidate = hint
+    bad_address = candidate & ~parseable
+    no_identity = candidate & parseable & ~has_id
+    kept = candidate & parseable & has_id
+
+    stats = IngestStats(
+        candidate_rows=int(candidate.sum()),
+        kept_rows=int(kept.sum()),
+        dropped_bad_address=int(bad_address.sum()),
+        dropped_no_identity=int(no_identity.sum()),
+        skipped_padding_rows=int((~candidate).sum()),
+    )
+    stats.dropped_rows = stats.dropped_bad_address + stats.dropped_no_identity
+
+    examples: list[DropExample] = []
+    for _, rec in out.loc[bad_address].head(MAX_DROP_EXAMPLES).iterrows():
+        examples.append(_drop_example("unparseable ROW/BANK/COL", rec))
+    remain = MAX_DROP_EXAMPLES - len(examples)
+    if remain > 0:
+        for _, rec in out.loc[no_identity].head(remain).iterrows():
+            examples.append(_drop_example("missing Site/Slot after fill-forward", rec))
+    stats.examples = examples
+
+    if stats.dropped_rows:
+        for line in stats.warning_lines():
+            log.warning("%s", line)
+    else:
+        log.info(
+            "ingest kept_rows=%s candidate_rows=%s padding_skipped=%s",
+            stats.kept_rows,
+            stats.candidate_rows,
+            stats.skipped_padding_rows,
+        )
+
+    if stats.kept_rows == 0:
+        raise NoValidAddressRowsError(
+            "No valid fail address rows after header detection / fill-forward "
+            f"(candidate_rows={stats.candidate_rows}, dropped_rows={stats.dropped_rows}, "
+            f"dropped_bad_address={stats.dropped_bad_address}, "
+            f"dropped_no_identity={stats.dropped_no_identity}). "
+            "All address rows were bad — refusing to emit a fake-clean report."
+        )
+
+    out = out.loc[kept].copy()
     out.reset_index(drop=True, inplace=True)
-    return out[CANONICAL_COLUMNS + ["row_i", "bank_i", "col_i", "linear_i", "loop_i"]]
+    return out[CANONICAL_COLUMNS + ["row_i", "bank_i", "col_i", "linear_i", "loop_i"]], stats
 
 
 def _read_table_csv(path: Path) -> pd.DataFrame:
@@ -266,7 +414,7 @@ def _extract_summary_kv(raw: pd.DataFrame) -> dict[str, str]:
     return found
 
 
-def load_fails(path: Path) -> tuple[pd.DataFrame, BatchMeta]:
+def load_fails(path: Path) -> tuple[pd.DataFrame, BatchMeta, IngestStats]:
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(path)
@@ -279,6 +427,6 @@ def load_fails(path: Path) -> tuple[pd.DataFrame, BatchMeta]:
         meta = BatchMeta(source_path=path)
     else:
         raise ValueError(f"Unsupported input type: {path.suffix}")
-    fails = normalize_fail_frame(raw)
+    fails, stats = normalize_fail_frame(raw)
     meta.source_path = path
-    return fails, meta
+    return fails, meta, stats

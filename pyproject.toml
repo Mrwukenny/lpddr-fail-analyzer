@@ -1,6 +1,6 @@
 [project]
 name = "lpddr-fail-analyzer"
-version = "0.1.0"
+version = "0.1.1"
 description = "Offline MVP CLI to classify LPDDR4/4X SLT fail_msg particle (die) structural suspects."
 readme = "README.md"
 requires-python = ">=3.11"

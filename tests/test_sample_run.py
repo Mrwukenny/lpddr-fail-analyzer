@@ -12,7 +12,10 @@ SAMPLE_CSV = ROOT / "samples" / "sample_fail_msg.csv"
 def test_sample_xlsx_writes_artifacts(tmp_path: Path):
     out = tmp_path / "demo"
     dest = run_analyze(SAMPLE_XLSX, out)
-    assert dest == out
+    assert dest.out_dir == out
+    assert dest.run_status == "ok"
+    assert dest.stats.dropped_rows == 0
+    assert dest.addr_audit.n_mismatch == 0
     assert (out / "report.md").is_file()
     assert (out / "summary.csv").is_file()
     assert (out / "normalized_fails.csv").is_file()
@@ -24,11 +27,19 @@ def test_sample_xlsx_writes_artifacts(tmp_path: Path):
     assert "T-SCE11N4G320AH-QCA2" in text
     assert "VDD1" in text
     assert "结构嫌疑" in text
+    assert "INCOMPLETE" not in text
+    assert "single-channel view" in text
+    assert "dual-channel mixing" in text
+    assert "tester decode granularity" in text
+    assert "NOT JEDEC bare physical column" in text
+    assert "dropped_rows" in text
     summary = (out / "summary.csv").read_text(encoding="utf-8")
     assert "primary_label" in summary
     assert "15" in summary
     assert "7" in summary
     assert "bad_column" in summary
+    assert "dropped_rows" in summary
+    assert "run_status" in summary
 
 
 def test_cli_module_exit_zero(tmp_path: Path):
