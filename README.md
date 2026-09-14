@@ -41,7 +41,7 @@ uv run python -m lpddr_fail_analyzer analyze samples\sample_fail_msg.csv --out o
 
 | 文件 | 内容 |
 | --- | --- |
-| `report.md` | 一页式报告：PN/LOT/温度/VDD*、总量、Pattern 表、结构、三句自动结论 |
+| `report.md` | 一页式报告：PN/LOT/温度/VDD*、可分析颗数、有地址明细 / 仅 board 不良无 dump、结构、三句自动结论 |
 | `summary.csv` | 每颗 Site+Slot 的主/次标签与计数 |
 | `heatmap_bankN.png` | 主 Bank 的 ROW×COL 失败热力图 |
 | `heatmap_combined.png` | 各 Bank 叠在一起的散点 |
@@ -63,11 +63,13 @@ uv run pytest
 - **真正表头** 是含有这些列名的那一行：`Site, Slot, Loop, Pattern Name, Linear ADDR, ROW, BANK, COL, EXP Value, RD Value, Re-read value1, Re-read value2, Re-read value3, XOR Val1`
 - 解析器会在前几十行里 **按列名搜索表头**，不写死行号
 - 同一颗的后续失败地址行里，Site / Slot / Loop / Pattern Name **经常是空的**，必须从上一行非空值 **向下填充（fill-forward）**
-- 多颗 = fill-forward 之后的多个 Site+Slot 组合
+- 多颗 = fill-forward 之后的多个 **唯一 Site+Slot**（同颗多轮 / 多 Loop **不计多次**）
 
 CSV 样本 `samples/sample_fail_msg.csv` 已是填好的版本，工具仍会做一次 fill-forward，空单元格也能补上。
 
 Summary 表若存在，会抽取 `PN`、`LOT ID`、`测试温度`、`VDD1/VDD2/VDDQ`、产量统计写入报告页眉。
+
+若存在 `board_msg`，会单独列出 **仅 board 不良、无 dump** 的 Site+Slot（本轮无法结构分类）。**可分析颗数**只来自 `fail_msg` 里带 ROW/BANK/COL 的唯一 Site+Slot，不要把分Bin 数量或 board 不良行数当成可分析颗数。
 
 ## 数据质量（避免假绿）
 
@@ -85,7 +87,7 @@ uv sync
 uv run python -m lpddr_fail_analyzer analyze samples/sample_batch.xlsx --out out/demo
 ```
 
-预期：命令退出码 0，并写出 `out/demo/report.md`、`out/demo/summary.csv` 以及 `heatmap_*.png`。该样本在 fill-forward 后是 Site=15 / Slot=7 的一颗颗粒，地址结构上列主导（坏列嫌疑）很强，同时可能带出行/Bank 次级嫌疑——请以报告为准，且它们都不是根因结论。
+预期：命令退出码 0，并写出 `out/demo/report.md`、`out/demo/summary.csv` 以及 `heatmap_*.png`。该样本在 fill-forward 后是 Site=15 / Slot=7 的**一颗**可分析颗粒（fail_msg 里有 3 个 Loop，仍计 1 颗），地址结构上列主导（坏列嫌疑）很强，同时可能带出行/Bank 次级嫌疑。`board_msg` 里还有其他不良 Site+Slot 没有地址 dump，报告会单独列出并标明无法结构分类——请以报告为准，且它们都不是根因结论。
 
 ## 分类优先级（强 → 弱）
 

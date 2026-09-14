@@ -14,7 +14,13 @@ import pandas as pd
 from lpddr_fail_analyzer.audit import AddrAudit
 from lpddr_fail_analyzer.classify import LABEL_ZH, DieAnalysis
 from lpddr_fail_analyzer.hexutil import fmt_hex
-from lpddr_fail_analyzer.ingest import BatchMeta, CANONICAL_COLUMNS, IngestStats
+from lpddr_fail_analyzer.ingest import (
+    BatchMeta,
+    BoardCensus,
+    CANONICAL_COLUMNS,
+    IngestStats,
+    board_fails_without_dump,
+)
 
 # P1 wording (must appear in report.md).
 CHANNEL_RANK_DISCLAIMER = (
@@ -24,6 +30,16 @@ CHANNEL_RANK_DISCLAIMER = (
 COL_GRANULARITY_DISCLAIMER = (
     "**COL is tester decode granularity, NOT JEDEC bare physical column**"
     "（COL 是测试机解码粒度，不是 JEDEC 裸物理列）。"
+)
+
+# Product-lock wording (must appear in report.md).
+SECTION_ANALYZABLE = "有地址明细（可分析）"
+SECTION_BOARD_ONLY = "仅 board 不良、无 dump"
+NO_STRUCTURE_MARK = "本轮无法结构分类"
+MULTI_LOOP_DIE_TIP = "同颗多轮/多 loop 勿累加颗数"
+BIN_COUNT_TIP = "别拿分Bin数量直接当可分析颗数"
+BOARD_MISSING_NOTE = (
+    "本批输入无 board_msg 表，无法列出仅 board 不良、无 dump 的颗粒。"
 )
 
 ARRAY_LIKE = {"bad_column", "bad_row", "spatial_2d_cluster", "bank_local_cluster"}
@@ -60,13 +76,27 @@ def write_summary_csv(
     stats: IngestStats | None = None,
     run_status: str = "ok",
     addr_mismatch: int = 0,
+    board: BoardCensus | None = None,
 ) -> None:
     dropped = stats.dropped_rows if stats is not None else 0
     dropped_bad = stats.dropped_bad_address if stats is not None else 0
+    n_analyzable = len(dies)
+    analyzable_keys = {(d.site, d.slot) for d in dies}
+    board_only: list = []
+    board_present = "no"
+    n_board_no_dump = ""
+    if board is not None and board.present and board.missing_reason is None:
+        board_present = "yes"
+        board_only = board_fails_without_dump(board, analyzable_keys)
+        n_board_no_dump = len(board_only)
+    elif board is not None:
+        board_present = "no"
+
     rows = []
     for d in dies:
         rows.append(
             {
+                "section": SECTION_ANALYZABLE,
                 "site": d.site,
                 "slot": d.slot,
                 "die_id": d.die_id,
@@ -81,10 +111,44 @@ def write_summary_csv(
                 "top_col": fmt_hex(d.top_cols[0][0]) if d.top_cols else "",
                 "top_bank": d.top_banks[0][0] if d.top_banks else "",
                 "xor_hint0": d.xor_hints[0] if d.xor_hints else "",
+                "note": "",
+                "n_board_fail_rows": "",
                 "run_status": run_status,
                 "dropped_rows": dropped,
                 "dropped_bad_address": dropped_bad,
                 "addr_mismatch": addr_mismatch,
+                "n_analyzable_dies": n_analyzable,
+                "n_board_no_dump": n_board_no_dump,
+                "board_msg_present": board_present,
+            }
+        )
+    for b in board_only:
+        rows.append(
+            {
+                "section": SECTION_BOARD_ONLY,
+                "site": b.site,
+                "slot": b.slot,
+                "die_id": b.die_id,
+                "n_fail_rows": "",
+                "n_unique_cells": "",
+                "n_patterns": "",
+                "n_loops": "",
+                "primary_label": "",
+                "primary_label_zh": NO_STRUCTURE_MARK,
+                "secondary_labels": "",
+                "top_row": "",
+                "top_col": "",
+                "top_bank": "",
+                "xor_hint0": "",
+                "note": NO_STRUCTURE_MARK,
+                "n_board_fail_rows": b.n_fail_rows,
+                "run_status": run_status,
+                "dropped_rows": dropped,
+                "dropped_bad_address": dropped_bad,
+                "addr_mismatch": addr_mismatch,
+                "n_analyzable_dies": n_analyzable,
+                "n_board_no_dump": n_board_no_dump,
+                "board_msg_present": board_present,
             }
         )
     pd.DataFrame(rows).to_csv(path, index=False, encoding="utf-8-sig")
@@ -221,7 +285,9 @@ def auto_conclusion(meta: BatchMeta, dies: list[DieAnalysis]) -> list[str]:
     zh = _label_zh(top_lab)
 
     sentence1 = (
-        f"本批 fail_msg 共 {n_dies} 颗颗粒、{n_rows} 条失败地址行，"
+        f"本批有地址明细、可分析颗粒 {n_dies} 颗"
+        f"（fail_msg 唯一 Site+Slot，同颗多轮/多 loop 不累加）、"
+        f"{n_rows} 条失败地址行，"
         f"主模式是「{zh}」({top_lab}，{top_n}/{n_dies} 颗主标签)。"
     )
 
@@ -292,6 +358,54 @@ def run_status_label(stats: IngestStats | None, audit: AddrAudit | None) -> str:
     return "ok"
 
 
+def _board_only_intro(board: BoardCensus, n_board_only: int) -> list[str]:
+    lines = [
+        f"## {SECTION_BOARD_ONLY}",
+        "",
+    ]
+    if not board.present or board.missing_reason in {"not_excel", "no_sheet"}:
+        lines.append(BOARD_MISSING_NOTE)
+        lines.append("")
+        return lines
+    if board.missing_reason == "bad_header":
+        lines.append(
+            "board_msg 表存在，但无法识别 Site/Slot/Result 表头，"
+            "无法列出仅 board 不良、无 dump 的颗粒。"
+        )
+        if board.header_error:
+            lines.append(f"（{board.header_error}）")
+        lines.append("")
+        return lines
+    if board.missing_reason == "empty":
+        lines.append("board_msg 表为空，无法列出仅 board 不良、无 dump 的颗粒。")
+        lines.append("")
+        return lines
+    lines.append(
+        "本节目列为 `board_msg` 中 Result=fail 的**唯一 Site+Slot**，"
+        "且 `fail_msg` 没有 ROW/BANK/COL 地址 dump。"
+        f"**{NO_STRUCTURE_MARK}**。"
+        " board 不良行数 / 分Bin 数量都不是可分析颗数。"
+    )
+    lines.append("")
+    lines.append(
+        f"- board 不良行（勿当作颗数）： **{board.n_fail_rows}**"
+    )
+    lines.append(
+        f"- board 不良唯一 Site+Slot： **{board.n_unique_fail_dies}**"
+    )
+    lines.append(f"- 其中无 dump、本轮无法结构分类： **{n_board_only}**")
+    lines.append("")
+    if n_board_only == 0:
+        lines.append(
+            "board_msg 中的不良 Site+Slot 均已出现在 fail_msg 地址明细中；本节目为空。"
+        )
+        lines.append("")
+        return lines
+    lines.append("| Site | Slot | board失败次数 | Bin | 说明 |")
+    lines.append("| --- | --- | ---: | --- | --- |")
+    return lines
+
+
 def write_report_md(
     meta: BatchMeta,
     fails: pd.DataFrame,
@@ -300,6 +414,7 @@ def write_report_md(
     out_path: Path,
     stats: IngestStats | None = None,
     audit: AddrAudit | None = None,
+    board: BoardCensus | None = None,
 ) -> None:
     n_dies = len(dies)
     n_rows = len(fails)
@@ -309,6 +424,15 @@ def write_report_md(
         pattern_total.update(d.pattern_counts)
     conclusions = auto_conclusion(meta, dies)
     status = run_status_label(stats, audit)
+
+    analyzable_keys = {(d.site, d.slot) for d in dies}
+    census = board if board is not None else BoardCensus(present=False, missing_reason="not_excel")
+    board_only = (
+        board_fails_without_dump(census, analyzable_keys)
+        if census.present and census.missing_reason is None
+        else []
+    )
+    n_board_only = len(board_only)
 
     header_rows = [
         ("输入文件", str(meta.source_path)),
@@ -365,7 +489,15 @@ def write_report_md(
             f"（unparseable ROW/BANK/COL={stats.dropped_bad_address}, "
             f"missing Site/Slot={stats.dropped_no_identity}）"
         )
-    lines.append(f"- 颗粒数（Site+Slot fill-forward 后）： **{n_dies}**")
+    lines.append(
+        f"- 可分析颗数（fail_msg 唯一 Site+Slot）： **{n_dies}**"
+    )
+    if census.present and census.missing_reason is None:
+        lines.append(
+            f"- 仅 board 不良、无 dump： **{n_board_only}**（{NO_STRUCTURE_MARK}）"
+        )
+    else:
+        lines.append(f"- 仅 board 不良、无 dump： 无 board_msg 表")
     lines.append(f"- 唯一 (ROW,BANK,COL) 格点： **{n_cells}**")
     lines.append(f"- Pattern 种类： **{fails['pattern_name'].nunique(dropna=True)}**")
     if audit is not None:
@@ -387,7 +519,15 @@ def write_report_md(
         for w in warn_bits:
             lines.append(f"- {w}")
     lines.append("")
-    lines.append("## 颗粒主标签")
+    lines.append(f"## {SECTION_ANALYZABLE}")
+    lines.append("")
+    lines.append(
+        "本节目列为 `fail_msg` 中带 ROW/BANK/COL 的**唯一 Site+Slot**。"
+        f"{MULTI_LOOP_DIE_TIP}；结构分类按唯一 (ROW,BANK,COL) 格点，多 loop 不放大坏行/坏列权重。"
+        f"{BIN_COUNT_TIP}。"
+    )
+    lines.append("")
+    lines.append("### 颗粒主标签")
     lines.append("")
     lines.append("| Site | Slot | fail行 | 唯一格点 | 主标签 | 次标签 | 顶 ROW | 顶 COL | 顶 BANK |")
     lines.append("| --- | --- | ---: | ---: | --- | --- | --- | --- | --- |")
@@ -401,22 +541,10 @@ def write_report_md(
             f"{_label_zh(d.primary_label)} | {sec} | {tr} | {tc} | {tb} |"
         )
     lines.append("")
-    lines.append("## Pattern 分布（fail 行）")
-    lines.append("")
-    if (out_path.parent / "pattern_pie.png").exists():
-        lines.append("![pattern pie](pattern_pie.png)")
-        lines.append("")
-    lines.append("| Pattern Name | fail行 | 占比 |")
-    lines.append("| --- | ---: | ---: |")
-    total_p = sum(pattern_total.values()) or 1
-    for name, cnt in pattern_total.most_common():
-        lines.append(f"| {name} | {cnt} | {cnt / total_p:.1%} |")
-    lines.append("")
-
-    lines.append("## 各颗结构细节")
+    lines.append("### 各颗结构细节")
     lines.append("")
     for d in dies:
-        lines.append(f"### {d.die_id}（Site {d.site}, Slot {d.slot}）")
+        lines.append(f"#### {d.die_id}（Site {d.site}, Slot {d.slot}）")
         lines.append("")
         lines.append(f"- 主标签：**{_label_zh(d.primary_label)}** (`{d.primary_label}`)")
         if d.secondary_labels:
@@ -430,6 +558,7 @@ def write_report_md(
             f" 顶 Bank {ev.get('top_bank')} 占 {ev.get('top_bank_share', 0):.0%}。"
         )
         lines.append(f"- Pattern 分解：{d.pattern_counts}")
+        lines.append(f"- Loop 数：{d.n_loops}（同颗多轮只计 1 颗）")
         lines.append(f"- 出现最多的 ROW：{_top_hex(d.top_rows)}")
         lines.append(f"- 出现最多的 COL：{_top_hex(d.top_cols)}")
         banks = ", ".join(f"BANK {b} ×{n}" for b, n in d.top_banks)
@@ -439,6 +568,27 @@ def write_report_md(
             for h in d.xor_hints[:4]:
                 lines.append(f"  - {h}")
         lines.append("")
+
+    lines.extend(_board_only_intro(census, n_board_only))
+    for b in board_only:
+        bins = ", ".join(b.bins) if b.bins else "—"
+        lines.append(
+            f"| {b.site} | {b.slot} | {b.n_fail_rows} | {bins} | {NO_STRUCTURE_MARK} |"
+        )
+    if board_only:
+        lines.append("")
+
+    lines.append("## Pattern 分布（fail 行）")
+    lines.append("")
+    if (out_path.parent / "pattern_pie.png").exists():
+        lines.append("![pattern pie](pattern_pie.png)")
+        lines.append("")
+    lines.append("| Pattern Name | fail行 | 占比 |")
+    lines.append("| --- | ---: | ---: |")
+    total_p = sum(pattern_total.values()) or 1
+    for name, cnt in pattern_total.most_common():
+        lines.append(f"| {name} | {cnt} | {cnt / total_p:.1%} |")
+    lines.append("")
 
     img_names = [p.name for p in heatmap_paths if p.suffix.lower() == ".png" and "heatmap" in p.name]
     if img_names:
@@ -457,6 +607,8 @@ def write_report_md(
     lines.append("")
     lines.append("## 提示")
     lines.append("")
+    lines.append(f"- **{MULTI_LOOP_DIE_TIP}**")
+    lines.append(f"- **{BIN_COUNT_TIP}**")
     lines.append(f"- {lpddr_type_tip(meta.pn)}")
     lines.append(f"- {CHANNEL_RANK_DISCLAIMER}")
     lines.append(f"- {COL_GRANULARITY_DISCLAIMER}")

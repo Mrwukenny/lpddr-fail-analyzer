@@ -33,6 +33,11 @@ def test_sample_xlsx_writes_artifacts(tmp_path: Path):
     assert "tester decode granularity" in text
     assert "NOT JEDEC bare physical column" in text
     assert "dropped_rows" in text
+    assert "有地址明细（可分析）" in text
+    assert "仅 board 不良、无 dump" in text
+    assert "同颗多轮/多 loop 勿累加颗数" in text
+    assert "别拿分Bin数量直接当可分析颗数" in text
+    assert "- 可分析颗数（fail_msg 唯一 Site+Slot）： **1**" in text
     summary = (out / "summary.csv").read_text(encoding="utf-8")
     assert "primary_label" in summary
     assert "15" in summary
